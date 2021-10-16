@@ -1,0 +1,105 @@
+import unittest, tempfile, os
+
+import bdmv_tool
+
+class TestProcessData(unittest.TestCase):
+  def assert_logged(self, input_data, expected_logs):
+    expected_logs.insert(0, 'INFO:root:Length bytes are set, verifying file structure')
+    with self.assertLogs(level='INFO') as log:
+      self.assertIsNone(bdmv_tool.process_data(input_data))
+      self.assertEqual(log.output, expected_logs)
+
+  def test_file_min(self):
+    input_data = bytearray([
+      0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00,
+    ])
+    expected_data = bytearray([
+      0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x10, # file length = 16
+    ]) + bdmv_tool.end_bytes
+    self.assertEqual(bdmv_tool.process_data(input_data), expected_data)
+
+  def test_file(self):
+    input_data = bytearray([
+      0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00,
+      0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
+    ])
+    expected_data = bytearray([
+      0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x1C, # file length = 28
+      0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
+    ]) + bdmv_tool.end_bytes
+    self.assertEqual(bdmv_tool.process_data(input_data), expected_data)
+
+  def test_verify_good(self):
+    input_data = bytearray([
+      0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x10,
+    ]) + bdmv_tool.end_bytes
+    self.assert_logged(input_data, [])
+
+  def test_verify_min_length(self):
+    input_data = bytearray([
+      0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x01,
+    ])
+    self.assert_logged(input_data, ['ERROR:root:Stored length 1 less than minimum length 16'])
+
+  def test_verify_length(self):
+    input_data = bytearray([
+      0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x11,
+    ])
+    self.assert_logged(input_data, ['ERROR:root:Stored length 17 greater than file length 16'])
+
+  def test_verify_end_bytes_length(self):
+    input_data = bytearray([
+      0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x11,
+    ]) + bdmv_tool.end_bytes
+    self.assert_logged(input_data, [
+      'WARNING:root:File has contains 23 bytes beyond stored length offset, but 24 were expected'
+    ])
+
+  def test_verify_end_bytes_length(self):
+    input_data = bytearray([
+      0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x10,
+      0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+      0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
+    ])
+    self.assert_logged(input_data, ['ERROR:root:Last 24 bytes do not match expected end bytes'])
+
+class TestProcessBDMV(unittest.TestCase):
+  def test_no_index(self):
+    d = tempfile.mkdtemp()
+    with self.assertLogs(level='INFO') as log:
+      bdmv_tool.process_bdmv(d)
+      self.assertEqual(log.output, ['ERROR:root:No index.bdmv file found'])
+
+  def test_no_backup(self):
+    d = tempfile.mkdtemp()
+    with open(os.path.join(d, bdmv_tool.index_name), 'wb') as f:
+      f.write(bytearray([
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00,
+      ]))
+    with self.assertLogs(level='INFO') as log:
+      bdmv_tool.process_bdmv(d)
+      self.assertEqual(log.output, [
+        'INFO:root:Creating backup directory',
+        'INFO:root:Copying index to backup',
+        'INFO:root:Length bytes from 0x0C to 0x0F are all 0x00, writing file length and appending special end bytes'
+      ])
+
+  def test_rerun(self):
+    d = tempfile.mkdtemp()
+    with open(os.path.join(d, bdmv_tool.index_name), 'wb') as f:
+      f.write(bytearray([
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00,
+      ]))
+    with self.assertLogs(level='INFO') as log:
+      bdmv_tool.process_bdmv(d)
+      bdmv_tool.process_bdmv(d)
+      self.assertEqual(log.output, [
+        'INFO:root:Creating backup directory',
+        'INFO:root:Copying index to backup',
+        'INFO:root:Length bytes from 0x0C to 0x0F are all 0x00, writing file length and appending special end bytes',
+        'INFO:root:Length bytes are set, verifying file structure',
+      ])
+
+
+if __name__ == '__main__':
+  unittest.main()
